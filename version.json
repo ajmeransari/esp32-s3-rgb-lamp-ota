@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
-  "url": "https://github.com/ajmeransari/esp32-s3-rgb-lamp-ota/releases/download/v1.0.0/rgb-lamp-v1.0.0.bin",
-  "sha256": "82f7378a485d7094b9dd0bf513db95bc99a05b89d79571ca6c252912e6b7ff44",
+  "version": "1.0.1",
+  "url": "https://github.com/ajmeransari/esp32-s3-rgb-lamp-ota/releases/download/v1.0.1/rgb-lamp-v1.0.1.bin",
+  "sha256": "b522cb366c73f0d6c82b11d171e7421363e13a3779056b684bceaf15c2c78b78",
   "size": 1093856
 }
