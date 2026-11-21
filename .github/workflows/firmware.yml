@@ -1,0 +1,101 @@
+name: Firmware build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core and pinned libraries
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.7
+          arduino-cli lib install "Adafruit NeoPixel@1.15.4"
+          arduino-cli lib install "ArduinoJson@7.4.3"
+
+      - name: Compile for the OTA partition layout
+        run: |
+          FQBN='esp32:esp32:esp32s3:UploadSpeed=115200,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=dfu,UploadMode=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=fatflash,DebugLevel=none,PSRAM=opi,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default'
+          arduino-cli compile --fqbn "$FQBN" --export-binaries --output-dir build RGBsetup
+          test -f build/RGBsetup.ino.bin
+          size=$(stat -c %s build/RGBsetup.ino.bin)
+          echo "Firmware image size: ${size} bytes"
+          test "$size" -le 2097152
+
+      - name: Check versioned tag matches source
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          source_version=$(sed -n 's/^#define FIRMWARE_VERSION "\([^"]*\)".*/\1/p' RGBsetup/RGBsetup.ino)
+          test -n "$source_version"
+          test "$tag_version" = "$source_version"
+
+      - name: Prepare release files
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          cp build/RGBsetup.ino.bin "dist/rgb-lamp-v${version}.bin"
+          sha256=$(sha256sum "dist/rgb-lamp-v${version}.bin" | cut -d ' ' -f 1)
+          size=$(stat -c %s "dist/rgb-lamp-v${version}.bin")
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/rgb-lamp-v${version}.bin"
+          printf '{\n  "version": "%s",\n  "url": "%s",\n  "sha256": "%s",\n  "size": %s\n}\n' "$version" "$url" "$sha256" "$size" > dist/version.json
+          python3 -m json.tool dist/version.json >/dev/null
+
+      - name: Save built firmware
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-release
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-release
+          path: dist
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ESP32-S3 RGB Lamp Firmware ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/rgb-lamp-*.bin
+            dist/version.json
+
+      - name: Update OTA manifest on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api_path="repos/${GITHUB_REPOSITORY}/contents/version.json"
+          content=$(base64 -w 0 dist/version.json)
+          args=(-X PUT "$api_path" -f message="Update OTA manifest for ${GITHUB_REF_NAME}" -f content="$content" -f branch=main)
+          if sha=$(gh api "$api_path?ref=main" --jq .sha 2>/dev/null); then
+            args+=(-f sha="$sha")
+          fi
+          gh api "${args[@]}" >/dev/null

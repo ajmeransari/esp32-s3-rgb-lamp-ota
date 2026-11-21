@@ -1,42 +1,23 @@
-# ESP32-S3 RGB Lamp OTA setup and releases
+# ESP32-S3 RGB Lamp OTA release guide
 
-The sketch keeps the existing Wi-Fi setup/recovery flow and RGB controller. OTA uses an HTTPS JSON manifest, an HTTPS firmware image, the configured CA certificate, and a SHA-256 check before the new image is activated.
+## Board configuration
 
-## Configure OTA once
+Use **ESP32S3 Dev Module**, ESP32 Arduino core **3.3.7**, 16 MB flash, OPI PSRAM, and the **16M FatFS / OTA** partition scheme (`PartitionScheme=fatflash`). This layout has two 2 MiB OTA application slots. The sketch caps firmware downloads at 2 MiB and rejects an image whose size or SHA-256 does not match the manifest.
 
-1. In the sketch, change `FIRMWARE_VERSION` to the version being built.
-2. Set `OTA_MANIFEST_URL` to the permanent HTTPS URL of `version.json`.
-3. Replace the placeholder in `OTA_ROOT_CA` with the PEM root/intermediate CA certificate that validates both the manifest and firmware host. Certificate validation is enabled; the sketch does not disable TLS checks.
-4. In Arduino IDE, select the exact ESP32-S3 board and a partition scheme that provides two app slots (OTA). Check the board vendor's flash size and scheme options; do not select a scheme based only on a guessed module name.
-5. Compile and inspect `/ota/status` from the lamp controller. It reports whether the active partition table has a next OTA app slot.
-6. If the currently installed partition table has no OTA slot, connect USB and upload this firmware once with the OTA-capable scheme selected. Future firmware images can then be installed from the controller's Firmware update section.
+If the lamp was previously flashed with a partition table that lacks OTA slots, connect USB and upload once using this OTA-capable scheme. This repartitioning upload may erase data. A later OTA update cannot change the partition table.
 
-Changing the sketch alone cannot add an OTA app slot to a device that was flashed with a non-OTA partition table.
+## Publish a version
 
-## Build and publish a release
+1. Change `FIRMWARE_VERSION` in `RGBsetup/RGBsetup.ino` to the next semantic version such as `1.0.1` and push the change to `main`.
+2. Create a tag with the same number prefixed by `v`, for example `v1.0.1`, and push it.
+3. The **Firmware build and release** GitHub Actions workflow compiles using the pinned board/core/library settings, rejects images above 2 MiB, computes the binary size and SHA-256, and creates a GitHub Release.
+4. The release contains the application image `rgb-lamp-v1.0.1.bin` plus `version.json`. The workflow also updates the repository root `version.json`, which the lamp reads from the configured HTTPS manifest URL.
+5. Check the Actions run and public release page before asking the lamp to check/install the update.
 
-1. Increase `FIRMWARE_VERSION` before each release, for example `1.0.1`.
-2. In Arduino IDE, choose **Sketch → Export Compiled Binary** with the same board and OTA partition scheme used for the initial flash. The sketch folder will contain the compiled `.bin` image. Use the application `.bin`, not a bootloader, partition-table, merged, or filesystem image.
-3. Upload the `.bin` to an HTTPS release host. Keep its URL stable in the manifest and make sure the host is covered by `OTA_ROOT_CA`.
-4. Calculate the image byte length and SHA-256 digest, then publish a `version.json` next to the image. Example:
+The tag version must exactly match `FIRMWARE_VERSION`. Use only the application `.bin`; do not use bootloader, partition table, filesystem, or merged image files. The GitHub Actions build is the versioned release build. A successful compile does not replace a real hardware OTA test.
 
-```json
-{
-  "version": "1.0.1",
-  "url": "https://your-host.example/releases/rgb-lamp-1.0.1.bin",
-  "sha256": "64-character-SHA-256-hex-digest",
-  "size": 1234567
-}
-```
+## Security and behavior
 
-5. Open the lamp controller, choose **Check for update**, then **Install update**. Keep power connected while the image downloads, verifies, and the lamp restarts.
+OTA requires Wi-Fi connectivity, HTTPS certificate validation, a valid three-part manifest version newer than the installed firmware, a firmware size in the declared limit, and a matching SHA-256 digest. The sketch has a pinned trust bundle for the GitHub HTTPS hosts; rotate it only after validating the replacement certificates. No TLS verification bypass is used.
 
-The manifest version must be a newer three-part numeric version (`major.minor.patch`). Firmware images are capped at 3 MiB and must fit the inactive app slot. The currently configured version is `1.0.0`; the URL and CA are intentionally placeholders until the release host is chosen.
-
-## Endpoints
-
-- `GET /ota/status` — installed version, partition support, state, and progress.
-- `POST /ota/check` — fetches and validates the HTTPS manifest.
-- `POST /ota/update` — downloads the image, checks its length and SHA-256, writes the inactive slot, and restarts after a successful update.
-
-The sketch currently uses the ESP32 Arduino core's built-in OTA slot selection. Automatic rollback requires enabling/configuring bootloader rollback in the board's build configuration; that is not assumed here.
+Existing SoftAP Wi-Fi provisioning, NVS credentials, connection retry and recovery fallback, setup/recovery page, and RGB controller remain in the sketch. Status and actions are available through `/ota/status`, `/ota/check`, and `/ota/update`. Automatic bootloader rollback is not configured.
