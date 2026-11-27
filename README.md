@@ -16,12 +16,12 @@ To build locally in Arduino IDE, open `RGBsetup/RGBsetup.ino`, select **ESP32S3 
 
 ## Versioned GitHub releases
 
-The release workflow runs for a tag named `vMAJOR.MINOR.PATCH` (for example `v1.0.3`) and requires the tag version to match `FIRMWARE_VERSION` in the sketch. It compiles the firmware, checks the OTA slot size, calculates SHA-256 and byte length, signs the manifest using the GitHub Actions secret `OTA_SIGNING_PRIVATE_KEY_PEM`, attaches `rgb-lamp-vMAJOR.MINOR.PATCH.bin` and `version.json` to a GitHub Release, then updates the root `version.json` manifest on `main`.
+The release workflow runs for a tag named `vMAJOR.MINOR.PATCH` (for example `v1.0.4`) and requires the tag version to match `FIRMWARE_VERSION` in the sketch. It compiles the firmware, checks the OTA slot size, calculates SHA-256 and byte length, signs the manifest using the GitHub Actions secret `OTA_SIGNING_PRIVATE_KEY_PEM`, attaches `rgb-lamp-vMAJOR.MINOR.PATCH.bin` and `version.json` to a GitHub Release, then updates the root `version.json` manifest on `main`.
 
 To publish a release:
 
 1. Set `FIRMWARE_VERSION` to the next three-part version in `RGBsetup/RGBsetup.ino` and push that source change to `main`.
-2. Create and push the matching version tag, such as `v1.0.3`.
+2. Create and push the matching version tag, such as `v1.0.4`.
 3. Confirm the **Firmware build and release** workflow succeeds in the repository's Actions tab.
 
 The device reads the manifest over HTTPS, verifies its RSA-2048/SHA-256 signature against the public key in the sketch, accepts only the repository release URL matching the signed version, then downloads firmware over HTTPS and checks its size and SHA-256 before writing the inactive OTA slot. HTTPS certificate checks remain enabled. The signing private key must be stored only as a repository Actions secret named `OTA_SIGNING_PRIVATE_KEY_PEM`; never commit it.
@@ -30,4 +30,4 @@ The device reads the manifest over HTTPS, verifies its RSA-2048/SHA-256 signatur
 
 The sketch retains the existing Wi-Fi provisioning and recovery page, NVS-stored credentials, connection retry/fallback, and RGB controls. OTA is exposed in the controller and through `/ota/status`, `/ota/check`, and `/ota/update`.
 
-Automatic bootloader rollback, Secure Boot, flash encryption, encrypted NVS, and authentication for the local setup/controller pages are not configured by this sketch. The existing setup AP password is a shared value in the source and should be changed before public deployment. Keep the lamp powered while installing an update. Version 1.0.3 must pass GitHub Actions and a real hardware OTA test before it is treated as a completed release.
+Automatic bootloader rollback, Secure Boot, flash encryption, encrypted NVS, and authentication for the local setup/controller pages are not configured by this sketch. The existing setup AP password is a shared value in the source and should be changed before public deployment. Keep the lamp powered while installing an update. Version 1.0.4 must pass GitHub Actions and a real hardware OTA test before it is treated as a completed release.

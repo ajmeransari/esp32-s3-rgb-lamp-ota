@@ -51,7 +51,7 @@
 
 // Configure these before using OTA. The manifest and firmware must both be
 // hosted on HTTPS endpoints trusted by this CA certificate.
-#define FIRMWARE_VERSION "1.0.3"
+#define FIRMWARE_VERSION "1.0.4"
 const char* OTA_MANIFEST_URL = "https://raw.githubusercontent.com/ajmeransari/esp32-s3-rgb-lamp-ota/main/version.json";
 const char OTA_ROOT_CA[] PROGMEM = R"CERT(
 -----BEGIN CERTIFICATE-----

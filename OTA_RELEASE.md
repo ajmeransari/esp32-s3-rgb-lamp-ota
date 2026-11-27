@@ -8,10 +8,10 @@ If the lamp was previously flashed with a partition table that lacks OTA slots, 
 
 ## Publish a version
 
-1. Change `FIRMWARE_VERSION` in `RGBsetup/RGBsetup.ino` to the next semantic version such as `1.0.3` and push the change to `main`.
-2. Create a tag with the same number prefixed by `v`, for example `v1.0.3`, and push it.
+1. Change `FIRMWARE_VERSION` in `RGBsetup/RGBsetup.ino` to the next semantic version such as `1.0.4` and push the change to `main`.
+2. Create a tag with the same number prefixed by `v`, for example `v1.0.4`, and push it.
 3. The **Firmware build and release** GitHub Actions workflow compiles using the pinned board/core/library settings, rejects images above 2 MiB, computes the binary size and SHA-256, signs the canonical manifest using the `OTA_SIGNING_PRIVATE_KEY_PEM` Actions secret, and creates a GitHub Release.
-4. The release contains the application image `rgb-lamp-v1.0.3.bin` plus a signed `version.json`. The workflow also updates the repository root `version.json`, which the lamp reads from the configured HTTPS manifest URL.
+4. The release contains the application image `rgb-lamp-v1.0.4.bin` plus a signed `version.json`. The workflow also updates the repository root `version.json`, which the lamp reads from the configured HTTPS manifest URL.
 5. Check the Actions run and public release page before asking the lamp to check/install the update.
 
 The tag version must exactly match `FIRMWARE_VERSION`. Use only the application `.bin`; do not use bootloader, partition table, filesystem, or merged image files. The GitHub Actions build is the versioned release build. A successful compile does not replace a real hardware OTA test.
