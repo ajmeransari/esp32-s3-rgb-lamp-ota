@@ -1,7 +1,7 @@
 {
-  "version": "1.0.4",
-  "url": "https://github.com/ajmeransari/esp32-s3-rgb-lamp-ota/releases/download/v1.0.4/rgb-lamp-v1.0.4.bin",
-  "sha256": "6be183bff84231aeb163c6a3cd4d6541d8550114fc8d5cf1061a5e2eba01c668",
-  "size": 1095696,
-  "signature": "Z4WW7Zj+RDrt3V75+6/BDCzYYS20B2IiQEsKFokHb4+9E/LKCY8JpVpw8NGTpp+6+svG40DEuwwsk2xQI/haRaSHnair/SLJuFKFlOo99369ol2Z0vLGfowWez0TRBf77pGkS9Jg8SaU7bjRsxXusk3RI0BtdiupbD+dqMS8IynSLcvnAM2Qe6nXiSSdUJ0rCfKa0IwwqbwhpnrLRNUT4XN6VagJbTWK21EMNsaIFwvfAXBgmy7SzwRt9Wkd/re689M2OVXX79u5U4ZMmiIO4bju+2bTXwhxu6wcyIzhJTZOhM40LgPENkBJyMhSZc4zAK5rjWKKrLQV/NxXCvWFbQ=="
+  "version": "1.0.5",
+  "url": "https://github.com/ajmeransari/esp32-s3-rgb-lamp-ota/releases/download/v1.0.5/rgb-lamp-v1.0.5.bin",
+  "sha256": "8b1a44e0fce5d46d0329ed12e5c3cf4146701cf322659e7b82357f9993981e5d",
+  "size": 1100000,
+  "signature": "f3DkTlXzKq2QcpaOUXgdzqT+hB5taFk7jlDtkklNMcPiPm3AWUE7tND0bXZbAGAJkhkVQKHzIOcl93LTg+44qzogSZHUvRbNg89dlybl79lRHdak9VcY65sZUw4WGBI7ysALpiTiRQGKXx8b0jv05PFelDqhqDEEYwn6es9/P93NX85ayCLfksNQrl2aehADJi7IaP3XIe3Gfj+FWfvIvc8BV/UcmjYZbl9etHmF4BNMOcP2Jkak3xAqMYDsMMLWPTyEMeKdHetLrfH1gq2+n5fvJzWXqLME9nGBWUu/35nMNMG/10rMwft60Byr8FeuLRcXi2p6MlYsyIZWHqMINw=="
 }
