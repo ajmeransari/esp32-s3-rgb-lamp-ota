@@ -51,7 +51,7 @@
 
 // Configure these before using OTA. The manifest and firmware must both be
 // hosted on HTTPS endpoints trusted by this CA certificate.
-#define FIRMWARE_VERSION "1.0.4"
+#define FIRMWARE_VERSION "1.0.5"
 const char* OTA_MANIFEST_URL = "https://raw.githubusercontent.com/ajmeransari/esp32-s3-rgb-lamp-ota/main/version.json";
 const char OTA_ROOT_CA[] PROGMEM = R"CERT(
 -----BEGIN CERTIFICATE-----
@@ -133,6 +133,9 @@ IPAddress netMask(255, 255, 255, 0);
 WebServer server(80);
 DNSServer dnsServer;
 Preferences preferences;
+WiFiClientSecure otaTlsClient;
+HTTPClient otaHttpClient;
+mbedtls_sha256_context otaShaContext;
 
 Adafruit_NeoPixel rgb(
   NUM_LEDS,
@@ -164,16 +167,37 @@ size_t otaExpectedSize = 0;
 bool otaUpdateAvailable = false;
 bool otaBusy = false;
 int otaProgress = 0;
+bool otaDownloadActive = false;
+bool otaShaActive = false;
+size_t otaReceivedBytes = 0;
+unsigned long otaLastDataAt = 0;
+unsigned long otaRestartAt = 0;
+bool bootValidationPending = false;
+unsigned long bootValidationStartedAt = 0;
+bool webServerStarted = false;
+bool recoveryApActive = false;
+unsigned long wifiDisconnectedAt = 0;
+unsigned long nextWifiRetryAt = 0;
+uint8_t wifiRetryCount = 0;
+unsigned long lampSettingsWriteAt = 0;
 
 bool connectionAttemptActive = false;
 bool connectionSucceeded = false;
 bool connectionFailed = false;
+bool savedWifiRetryActive = false;
 
 unsigned long connectionStartTime = 0;
+unsigned long savedWifiRetryAt = 0;
+unsigned long nextSavedWifiRetryAt = 0;
 unsigned long rebootAt = 0;
 
 const unsigned long WIFI_TIMEOUT = 20000;
 const unsigned long REBOOT_DELAY = 2500;
+const unsigned long WIFI_RECOVERY_AP_DELAY = 120000;
+const unsigned long WIFI_RETRY_MAX_MS = 60000;
+const unsigned long BOOT_HEALTH_CHECK_MS = 15000;
+const unsigned long SAVED_WIFI_RETRY_TIMEOUT_MS = 15000;
+const unsigned long SAVED_WIFI_RETRY_INTERVAL_MS = 60000;
 
 // ======================================================
 // RGB LED
@@ -314,8 +338,26 @@ void loadCredentials() {
 
   savedSSID = preferences.getString("ssid", "");
   savedPassword = preferences.getString("password", "");
+  red = preferences.getUChar("red", (uint8_t)red);
+  green = preferences.getUChar("green", (uint8_t)green);
+  blue = preferences.getUChar("blue", (uint8_t)blue);
+  ledEnabled = preferences.getBool("ledOn", ledEnabled);
 
   preferences.end();
+}
+
+void scheduleLampSettingsSave() {
+  lampSettingsWriteAt = millis() + 1000;
+}
+
+void saveLampSettings() {
+  preferences.begin("rgb-device", false);
+  preferences.putUChar("red", (uint8_t)red);
+  preferences.putUChar("green", (uint8_t)green);
+  preferences.putUChar("blue", (uint8_t)blue);
+  preferences.putBool("ledOn", ledEnabled);
+  preferences.end();
+  lampSettingsWriteAt = 0;
 }
 
 void saveCredentials(const String& ssid, const String& password) {
@@ -554,10 +596,14 @@ async function loadOtaStatus() {
   try {
     const result = await (await fetch("/ota/status")).json();
     document.getElementById("fwVersion").textContent = result.version;
-    document.getElementById("otaStatus").textContent = result.supported
-      ? result.message
+    const label = document.getElementById("otaStatus");
+    const bar = document.getElementById("otaBar");
+    bar.style.width = `${result.progress || 0}%`;
+    label.textContent = result.supported
+      ? `${result.message}${result.busy ? ` ${result.progress}%` : ""}${result.recoveryAp ? " Wi-Fi recovery AP is active." : ""}`
       : "No OTA app slot is available. Select an OTA partition scheme and install it once over USB.";
-    document.getElementById("checkUpdateBtn").disabled = !result.supported;
+    document.getElementById("checkUpdateBtn").disabled = !result.supported || result.busy || result.rebooting;
+    if (!result.busy && !result.rebooting) document.getElementById("installUpdateBtn").disabled = false;
   } catch (error) { document.getElementById("otaStatus").textContent = "Update status unavailable."; }
 }
 
@@ -579,8 +625,11 @@ async function installUpdate() {
     const response = await fetch("/ota/update", {method:"POST"});
     const result = await response.json();
     document.getElementById("otaStatus").textContent = result.message;
-  } catch (error) { document.getElementById("otaStatus").textContent = "Update failed or the lamp is restarting."; }
+    if (response.status !== 202) document.getElementById("installUpdateBtn").disabled = false;
+  } catch (error) { document.getElementById("otaStatus").textContent = "Update connection failed or the lamp is restarting."; }
 }
+
+setInterval(loadOtaStatus, 1000);
 
 r.addEventListener("input", updateUI);
 g.addEventListener("input", updateUI);
@@ -806,6 +855,8 @@ document.getElementById("wifiForm").addEventListener("submit", async function(e)
 
 void startProvisioning() {
   provisioningMode = true;
+  savedWifiRetryActive = false;
+  nextSavedWifiRetryAt = millis() + 30000;
 
   connectionAttemptActive = false;
   connectionSucceeded = false;
@@ -889,6 +940,7 @@ void startProvisioning() {
     pendingSSID = newSSID;
     pendingPassword = newPassword;
 
+    savedWifiRetryActive = false;
     connectionAttemptActive = true;
     connectionSucceeded = false;
     connectionFailed = false;
@@ -944,6 +996,7 @@ void startProvisioning() {
   });
 
   server.begin();
+  webServerStarted = true;
 
   Serial.println("Setup web server started");
 }
@@ -951,6 +1004,141 @@ void startProvisioning() {
 // ======================================================
 // NORMAL MODE WEB SERVER
 // ======================================================
+
+void failOtaDownload(const String& message) {
+  if (otaShaActive) {
+    mbedtls_sha256_free(&otaShaContext);
+    otaShaActive = false;
+  }
+  if (otaDownloadActive) Update.abort();
+  otaHttpClient.end();
+  otaDownloadActive = false;
+  otaBusy = false;
+  otaStatusMessage = message;
+}
+
+void finishOtaDownload() {
+  uint8_t digest[32];
+  mbedtls_sha256_finish(&otaShaContext, digest);
+  mbedtls_sha256_free(&otaShaContext);
+  otaShaActive = false;
+  otaHttpClient.end();
+  char actualSha[65];
+  for (int i = 0; i < 32; i++) sprintf(actualSha + (i * 2), "%02x", digest[i]);
+  actualSha[64] = '\0';
+  if (strcasecmp(actualSha, otaExpectedSha256.c_str()) != 0) {
+    failOtaDownload("SHA-256 did not match; the active firmware was kept.");
+    return;
+  }
+  if (!Update.end(true)) {
+    failOtaDownload("ESP32 could not finalize the verified firmware.");
+    return;
+  }
+  otaDownloadActive = false;
+  otaBusy = false;
+  otaProgress = 100;
+  otaStatusMessage = "Update verified. Restarting now.";
+  otaRestartAt = millis() + 1500;
+}
+
+void processOtaDownload() {
+  if (!otaDownloadActive) return;
+  WiFiClient* stream = otaHttpClient.getStreamPtr();
+  if (stream == nullptr) {
+    failOtaDownload("Firmware download stream closed unexpectedly.");
+    return;
+  }
+  uint8_t buffer[1024];
+  size_t processedThisLoop = 0;
+  while (otaReceivedBytes < otaExpectedSize && processedThisLoop < 4096) {
+    int available = stream->available();
+    if (available <= 0) break;
+    size_t requestSize = min((size_t)available, min(sizeof(buffer), (size_t)(4096 - processedThisLoop)));
+    int amount = stream->read(buffer, requestSize);
+    if (amount <= 0) break;
+    if (Update.write(buffer, (size_t)amount) != (size_t)amount) {
+      failOtaDownload("Flash write failed; the active firmware was kept.");
+      return;
+    }
+    mbedtls_sha256_update(&otaShaContext, buffer, (size_t)amount);
+    otaReceivedBytes += (size_t)amount;
+    processedThisLoop += (size_t)amount;
+    otaLastDataAt = millis();
+    otaProgress = (int)((otaReceivedBytes * 100) / otaExpectedSize);
+  }
+  if (otaReceivedBytes == otaExpectedSize) finishOtaDownload();
+  else if (millis() - otaLastDataAt > 30000 || (!stream->connected() && stream->available() == 0))
+    failOtaDownload("Firmware download stopped before completion; the active firmware was kept.");
+}
+
+void maintainWiFiConnection() {
+  if (provisioningMode || otaBusy) return;
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiDisconnectedAt = 0;
+    wifiRetryCount = 0;
+    nextWifiRetryAt = 0;
+    if (recoveryApActive) {
+      dnsServer.stop();
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_STA);
+      recoveryApActive = false;
+      Serial.println("Saved Wi-Fi restored; recovery AP stopped.");
+    }
+    return;
+  }
+  if (savedSSID.isEmpty()) return;
+  const unsigned long now = millis();
+  if (wifiDisconnectedAt == 0) {
+    wifiDisconnectedAt = now;
+    nextWifiRetryAt = now + 5000;
+    Serial.println("Wi-Fi disconnected; lamp remains active while reconnecting.");
+  }
+  if (nextWifiRetryAt != 0 && (long)(now - nextWifiRetryAt) >= 0) {
+    WiFi.mode(recoveryApActive ? WIFI_AP_STA : WIFI_STA);
+    WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
+    uint8_t shift = min((uint8_t)wifiRetryCount, (uint8_t)4);
+    unsigned long delayMs = min((unsigned long)5000 << shift, WIFI_RETRY_MAX_MS);
+    if (wifiRetryCount < 10) wifiRetryCount++;
+    nextWifiRetryAt = now + delayMs;
+    Serial.printf("Wi-Fi reconnect attempt %u; next retry in %lu ms.\n", wifiRetryCount, delayMs);
+  }
+  if (!recoveryApActive && now - wifiDisconnectedAt >= WIFI_RECOVERY_AP_DELAY) {
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAPConfig(apIP, apIP, netMask);
+    if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
+      dnsServer.start(53, "*", apIP);
+      recoveryApActive = true;
+      Serial.println("Recovery AP is available; use Wi-Fi settings to open provisioning.");
+    }
+  }
+}
+
+void beginBootValidation() {
+#if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE)
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+  if (running != nullptr && esp_ota_get_state_partition(running, &state) == ESP_OK &&
+      state == ESP_OTA_IMG_PENDING_VERIFY) {
+    bootValidationPending = true;
+    bootValidationStartedAt = millis();
+    Serial.println("New OTA image pending health validation.");
+  }
+#endif
+}
+
+void handleBootValidation() {
+#if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE)
+  if (bootValidationPending && webServerStarted && millis() - bootValidationStartedAt >= BOOT_HEALTH_CHECK_MS) {
+    esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
+    if (result == ESP_OK) {
+      bootValidationPending = false;
+      Serial.println("Firmware health check passed; rollback protection confirmed.");
+    } else {
+      Serial.printf("Could not confirm OTA image (%s); bootloader rollback remains available.\n", esp_err_to_name(result));
+    }
+  }
+#endif
+}
 
 void startNormalWebServer() {
   provisioningMode = false;
@@ -972,6 +1160,7 @@ void startNormalWebServer() {
       blue = constrain(server.arg("b").toInt(), 0, 255);
 
     updateLED();
+    scheduleLampSettingsSave();
 
     server.send(200, "text/plain", "OK");
   });
@@ -983,6 +1172,7 @@ void startNormalWebServer() {
     }
 
     updateLED();
+    scheduleLampSettingsSave();
     server.send(200, "text/plain", "OK");
   });
 
@@ -993,8 +1183,17 @@ void startNormalWebServer() {
     String json = "{\"version\":\"" FIRMWARE_VERSION "\",\"supported\":";
     json += supported ? "true" : "false";
     json += ",\"busy\":" + String(otaBusy ? "true" : "false");
+    json += ",\"rebooting\":" + String(otaRestartAt != 0 ? "true" : "false");
     json += ",\"progress\":" + String(otaProgress);
     json += ",\"updateAvailable\":" + String(otaUpdateAvailable ? "true" : "false");
+    json += ",\"wifiConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
+    json += ",\"recoveryAp\":" + String(recoveryApActive ? "true" : "false");
+    json += ",\"rollbackPending\":" + String(bootValidationPending ? "true" : "false");
+#if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE)
+    json += ",\"rollbackEnabled\":true";
+#else
+    json += ",\"rollbackEnabled\":false";
+#endif
     json += ",\"message\":\"" + jsonEscape(otaStatusMessage) + "\"}";
     server.send(200, "application/json", json);
   });
@@ -1056,50 +1255,40 @@ void startNormalWebServer() {
   });
 
   server.on("/ota/update", HTTP_POST, []() {
-    if (otaBusy) { server.send(409, "application/json", "{\"message\":\"An update is already running.\"}"); return; }
+    if (otaBusy || otaRestartAt != 0) { server.send(409, "application/json", "{\"message\":\"An update is already running or restarting.\"}"); return; }
     if (!otaUpdateAvailable || otaFirmwareUrl.length() == 0 || otaExpectedSize == 0) {
       server.send(409, "application/json", "{\"message\":\"Check for a newer update first.\"}"); return;
     }
-    otaBusy = true; otaProgress = 0; otaStatusMessage = "Downloading and verifying firmware...";
-    WiFiClientSecure tls; tls.setCACert(OTA_ROOT_CA);
-    HTTPClient http; http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-    if (!http.begin(tls, otaFirmwareUrl)) {
-      otaStatusMessage = "Could not open the firmware download."; otaBusy = false;
+    otaBusy = true;
+    otaProgress = 0;
+    otaReceivedBytes = 0;
+    otaStatusMessage = "Connecting to the signed firmware release...";
+    otaTlsClient.setCACert(OTA_ROOT_CA);
+    otaTlsClient.setTimeout(10000);
+    otaHttpClient.setConnectTimeout(10000);
+    otaHttpClient.setTimeout(10000);
+    otaHttpClient.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+    if (!otaHttpClient.begin(otaTlsClient, otaFirmwareUrl)) {
+      failOtaDownload("Could not open the HTTPS firmware download.");
       server.send(502, "application/json", "{\"message\":\"" + jsonEscape(otaStatusMessage) + "\"}"); return;
     }
-    int code = http.GET();
-    int contentLength = http.getSize();
-    if (code != HTTP_CODE_OK || contentLength <= 0 || (size_t)contentLength != otaExpectedSize || !Update.begin(otaExpectedSize)) {
-      http.end(); otaStatusMessage = "Firmware size is wrong or the OTA slot is too small."; otaBusy = false;
+    int code = otaHttpClient.GET();
+    int contentLength = otaHttpClient.getSize();
+    if (code != HTTP_CODE_OK || contentLength <= 0 || (size_t)contentLength != otaExpectedSize) {
+      failOtaDownload("Firmware response size is wrong or the server rejected the download.");
       server.send(502, "application/json", "{\"message\":\"" + jsonEscape(otaStatusMessage) + "\"}"); return;
     }
-    mbedtls_sha256_context shaCtx; mbedtls_sha256_init(&shaCtx); mbedtls_sha256_starts(&shaCtx, 0);
-    WiFiClient* stream = http.getStreamPtr();
-    uint8_t buffer[1024]; size_t received = 0; unsigned long lastData = millis();
-    while (received < otaExpectedSize && millis() - lastData < 30000) {
-      size_t available = stream->available();
-      if (available == 0) { delay(2); continue; }
-      size_t amount = stream->readBytes(reinterpret_cast<char*>(buffer), min(available, sizeof(buffer)));
-      if (amount == 0 || Update.write(buffer, amount) != amount) break;
-      mbedtls_sha256_update(&shaCtx, buffer, amount);
-      received += amount; lastData = millis();
-      otaProgress = (int)((received * 100) / otaExpectedSize);
+    if (!Update.begin(otaExpectedSize)) {
+      failOtaDownload("OTA slot is too small or could not be opened.");
+      server.send(507, "application/json", "{\"message\":\"" + jsonEscape(otaStatusMessage) + "\"}"); return;
     }
-    uint8_t digest[32]; mbedtls_sha256_finish(&shaCtx, digest); mbedtls_sha256_free(&shaCtx); http.end();
-    char actualSha[65];
-    for (int i = 0; i < 32; i++) sprintf(actualSha + (i * 2), "%02x", digest[i]);
-    actualSha[64] = '\0';
-    if (received != otaExpectedSize || strcasecmp(actualSha, otaExpectedSha256.c_str()) != 0) {
-      Update.abort(); otaStatusMessage = "SHA-256 did not match; the existing firmware remains active."; otaBusy = false;
-      server.send(502, "application/json", "{\"message\":\"" + jsonEscape(otaStatusMessage) + "\"}"); return;
-    }
-    if (!Update.end(true)) {
-      otaStatusMessage = "ESP32 could not finalize the verified firmware."; otaBusy = false;
-      server.send(500, "application/json", "{\"message\":\"" + jsonEscape(otaStatusMessage) + "\"}"); return;
-    }
-    otaProgress = 100; otaStatusMessage = "Update verified. Restarting now.";
-    server.send(200, "application/json", "{\"message\":\"" + jsonEscape(otaStatusMessage) + "\"}");
-    delay(500); ESP.restart();
+    mbedtls_sha256_init(&otaShaContext);
+    mbedtls_sha256_starts(&otaShaContext, 0);
+    otaShaActive = true;
+    otaDownloadActive = true;
+    otaLastDataAt = millis();
+    otaStatusMessage = "Downloading and verifying firmware...";
+    server.send(202, "application/json", "{\"message\":\"" + jsonEscape(otaStatusMessage) + "\"}");
   });
 
   // Enter setup mode
@@ -1128,6 +1317,7 @@ void startNormalWebServer() {
   });
 
   server.begin();
+  webServerStarted = true;
 
   Serial.println("RGB controller web server started");
 }
@@ -1190,6 +1380,7 @@ void setup() {
   rgb.show();
 
   loadCredentials();
+  updateLED();
 
   bool forcedSetup = setupRequested();
   clearSetupRequest();
@@ -1203,6 +1394,7 @@ void setup() {
   } else {
     startProvisioning();
   }
+  beginBootValidation();
 }
 
 // ======================================================
@@ -1212,10 +1404,42 @@ void setup() {
 void loop() {
   server.handleClient();
 
-  if (provisioningMode) {
+  if (provisioningMode || recoveryApActive) {
     dnsServer.processNextRequest();
+  }
 
+  maintainWiFiConnection();
+  processOtaDownload();
+  handleBootValidation();
+
+  if (lampSettingsWriteAt != 0 && (long)(millis() - lampSettingsWriteAt) >= 0) {
+    saveLampSettings();
+  }
+
+  if (provisioningMode) {
     // Monitor pending WiFi connection
+    if (!connectionAttemptActive && !savedWifiRetryActive && savedSSID.length() > 0 &&
+        nextSavedWifiRetryAt != 0 && (long)(millis() - nextSavedWifiRetryAt) >= 0) {
+      WiFi.mode(WIFI_AP_STA);
+      WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
+      savedWifiRetryActive = true;
+      savedWifiRetryAt = millis();
+      nextSavedWifiRetryAt = 0;
+      Serial.println("Recovery portal is active; retrying the saved Wi-Fi network.");
+    }
+
+    if (savedWifiRetryActive) {
+      if (WiFi.status() == WL_CONNECTED) {
+        savedWifiRetryActive = false;
+        Serial.println("Saved Wi-Fi returned; restarting in normal mode.");
+        rebootAt = millis() + 1000;
+      } else if (millis() - savedWifiRetryAt >= SAVED_WIFI_RETRY_TIMEOUT_MS) {
+        WiFi.disconnect(false);
+        savedWifiRetryActive = false;
+        nextSavedWifiRetryAt = millis() + SAVED_WIFI_RETRY_INTERVAL_MS;
+      }
+    }
+
     if (connectionAttemptActive) {
       if (WiFi.status() == WL_CONNECTED) {
         connectionAttemptActive = false;
@@ -1236,6 +1460,7 @@ void loop() {
         connectionAttemptActive = false;
         connectionSucceeded = false;
         connectionFailed = true;
+        nextSavedWifiRetryAt = millis() + SAVED_WIFI_RETRY_INTERVAL_MS;
 
         WiFi.disconnect();
 
@@ -1247,6 +1472,10 @@ void loop() {
   // Reboot after success or when setup/reset is requested
   if (rebootAt != 0 && millis() >= rebootAt) {
     rebootAt = 0;
+    ESP.restart();
+  }
+  if (otaRestartAt != 0 && millis() >= otaRestartAt) {
+    otaRestartAt = 0;
     ESP.restart();
   }
 }

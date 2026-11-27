@@ -8,10 +8,10 @@ If the lamp was previously flashed with a partition table that lacks OTA slots, 
 
 ## Publish a version
 
-1. Change `FIRMWARE_VERSION` in `RGBsetup/RGBsetup.ino` to the next semantic version such as `1.0.4` and push the change to `main`.
-2. Create a tag with the same number prefixed by `v`, for example `v1.0.4`, and push it.
+1. Change `FIRMWARE_VERSION` in `RGBsetup/RGBsetup.ino` to the next semantic version such as `1.0.5` and push the change to `main`.
+2. Create a tag with the same number prefixed by `v`, for example `v1.0.5`, and push it.
 3. The **Firmware build and release** GitHub Actions workflow compiles using the pinned board/core/library settings, rejects images above 2 MiB, computes the binary size and SHA-256, signs the canonical manifest using the `OTA_SIGNING_PRIVATE_KEY_PEM` Actions secret, and creates a GitHub Release.
-4. The release contains the application image `rgb-lamp-v1.0.4.bin` plus a signed `version.json`. The workflow also updates the repository root `version.json`, which the lamp reads from the configured HTTPS manifest URL.
+4. The release contains the application image `rgb-lamp-v1.0.5.bin` plus a signed `version.json`. The workflow also updates the repository root `version.json`, which the lamp reads from the configured HTTPS manifest URL.
 5. Check the Actions run and public release page before asking the lamp to check/install the update.
 
 The tag version must exactly match `FIRMWARE_VERSION`. Use only the application `.bin`; do not use bootloader, partition table, filesystem, or merged image files. The GitHub Actions build is the versioned release build. A successful compile does not replace a real hardware OTA test.
@@ -20,8 +20,10 @@ The tag version must exactly match `FIRMWARE_VERSION`. Use only the application 
 
 OTA requires Wi-Fi connectivity, HTTPS certificate validation, a valid three-part manifest version newer than the installed firmware, a firmware size in the declared limit, and a valid RSA-2048/SHA-256 signature from the embedded public key, a repository release URL matching the signed version, and a matching firmware SHA-256 digest. The sketch has a pinned trust bundle for the GitHub HTTPS hosts; rotate it only after validating the replacement certificates. No TLS verification bypass is used.
 
-Existing SoftAP Wi-Fi provisioning, NVS credentials, connection retry and recovery fallback, setup/recovery page, and RGB controller remain in the sketch. Status and actions are available through `/ota/status`, `/ota/check`, and `/ota/update`. Automatic bootloader rollback is not configured.
+Existing SoftAP Wi-Fi provisioning, NVS credentials, setup/recovery page, and RGB controls remain. v1.0.5 adds bounded reconnect retries with a recovery AP after two minutes, NVS persistence for the last RGB state, and asynchronous OTA transfer with progress polling through `/ota/status`, `/ota/check`, and `/ota/update`.
 
 ## Security scope
 
-This release verifies signed OTA metadata, restricts firmware URLs to this repository's versioned Releases, validates HTTPS certificates, and checks image size and SHA-256 before installation. It does not configure bootloader rollback, Secure Boot, flash encryption, encrypted NVS, or authentication on the local setup/controller pages. Do not describe those device-level protections as enabled until their separate bootloader/build and hardware provisioning work is completed and tested.
+The app confirms a new image after 15 seconds of stable web-server operation. The pinned ESP32-S3 core profile enables bootloader rollback, and CI checks that setting. The device's installed bootloader must be confirmed compatible; OTA does not replace the bootloader. Test a failed-boot rollback on a spare board before relying on it.
+
+This release verifies signed OTA metadata, restricts firmware URLs to this repository's versioned Releases, validates HTTPS certificates, and checks image size and SHA-256 before installation. Secure Boot, flash encryption, encrypted NVS, and authentication on the local setup/controller pages are not configured. Secure Boot and flash encryption require deliberate device provisioning and can limit recovery; they must not be reported as enabled until provisioned and verified on the board.

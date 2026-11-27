@@ -30,6 +30,8 @@ jobs:
 
       - name: Compile for the OTA partition layout
         run: |
+          sdkconfig="$HOME/.arduino15/packages/esp32/tools/esp32s3-libs/3.3.7/sdkconfig"
+          grep -qx 'CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' "$sdkconfig"
           FQBN='esp32:esp32:esp32s3:UploadSpeed=115200,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=dfu,UploadMode=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=fatflash,DebugLevel=none,PSRAM=opi,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default'
           arduino-cli compile --fqbn "$FQBN" --export-binaries --output-dir build RGBsetup
           test -f build/RGBsetup.ino.bin
