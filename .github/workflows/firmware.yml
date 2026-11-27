@@ -47,14 +47,23 @@ jobs:
 
       - name: Prepare release files
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          OTA_SIGNING_PRIVATE_KEY_PEM: ${{ secrets.OTA_SIGNING_PRIVATE_KEY_PEM }}
         run: |
+          set -euo pipefail
+          test -n "$OTA_SIGNING_PRIVATE_KEY_PEM" || { echo 'Missing Actions secret OTA_SIGNING_PRIVATE_KEY_PEM'; exit 1; }
           version="${GITHUB_REF_NAME#v}"
           mkdir -p dist
           cp build/RGBsetup.ino.bin "dist/rgb-lamp-v${version}.bin"
           sha256=$(sha256sum "dist/rgb-lamp-v${version}.bin" | cut -d ' ' -f 1)
           size=$(stat -c %s "dist/rgb-lamp-v${version}.bin")
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/rgb-lamp-v${version}.bin"
-          printf '{\n  "version": "%s",\n  "url": "%s",\n  "sha256": "%s",\n  "size": %s\n}\n' "$version" "$url" "$sha256" "$size" > dist/version.json
+          printf '%s' "$OTA_SIGNING_PRIVATE_KEY_PEM" > signing-key.pem
+          trap 'rm -f signing-key.pem payload.txt signature.bin' EXIT
+          printf 'ESP32-RGB-OTA-v1\nversion:%s\nurl:%s\nsha256:%s\nsize:%s\n' "$version" "$url" "$sha256" "$size" > payload.txt
+          openssl dgst -sha256 -sign signing-key.pem -out signature.bin payload.txt
+          signature=$(base64 -w 0 signature.bin)
+          printf '{\n  "version": "%s",\n  "url": "%s",\n  "sha256": "%s",\n  "size": %s,\n  "signature": "%s"\n}\n' "$version" "$url" "$sha256" "$size" "$signature" > dist/version.json
           python3 -m json.tool dist/version.json >/dev/null
 
       - name: Save built firmware

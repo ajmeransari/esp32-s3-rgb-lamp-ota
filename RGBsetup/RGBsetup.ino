@@ -37,6 +37,8 @@
 #include <Update.h>
 #include <ArduinoJson.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/base64.h>
 #include <esp_ota_ops.h>
 
 // ======================================================
@@ -114,6 +116,9 @@ m+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )CERT";
 const size_t OTA_MAX_FIRMWARE_BYTES = 0x200000; // 2 MiB OTA app slot ceiling
+// Public verification key only. The matching private key must stay in GitHub Actions secrets.
+const char OTA_SIGNING_PUBLIC_KEY[] PROGMEM = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3bjdJ9Ih9MpMiHNF/Gd5\nrTx29Aq+73NXDaxQGTXhMt3xmHRzOTmFgCq969d57zPC7PjNBAW+Qlker4zqIApI\nloz4yoK69BqKLeEpObjXeAT0nBrR+wt1fwmDDjcnc9bXdojZeDHSU9kvdgbrHLhD\nK8AVBG9fAos0/urnxhmRqCyHd1d6GRLyXfeKXJdMUwWT6yoma/6E0HQR8McWvhUc\nSdOEItGurGWPbCkNmCYDvsEsyhJfseG9UWh05MQTNVpGIkHwa4JbZ6nKAi9DywLM\n4FRXrOspHC1+hEoXVGkF7lL5hhHE5pqEOq9xGoXYOsPUBKrzKhNBIHBw+pcyo0N2\nGQIDAQAB\n-----END PUBLIC KEY-----";
+const char* OTA_RELEASE_PREFIX = "https://github.com/ajmeransari/esp32-s3-rgb-lamp-ota/releases/download/";
 
 const char* AP_SSID = "RGB-Lamp-Setup";
 const char* AP_PASSWORD = "RGBsetup123";  // Prototype password
@@ -252,6 +257,30 @@ bool isSha256Hex(const char* value) {
     if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
   }
   return true;
+}
+
+bool isTrustedOtaUrl(const char* url, const String& version) {
+  String expected = String(OTA_RELEASE_PREFIX) + "v" + version + "/rgb-lamp-v" + version + ".bin";
+  return String(url) == expected;
+}
+
+bool verifyManifestSignature(const char* version, const char* url, const char* sha256,
+                             size_t imageSize, const char* signatureBase64) {
+  String payload = String("ESP32-RGB-OTA-v1\nversion:") + version + "\nurl:" + url +
+                   "\nsha256:" + sha256 + "\nsize:" + String((unsigned long)imageSize) + "\n";
+  uint8_t signature[512]; size_t signatureLength = 0;
+  if (mbedtls_base64_decode(signature, sizeof(signature), &signatureLength,
+                            reinterpret_cast<const unsigned char*>(signatureBase64), strlen(signatureBase64)) != 0) return false;
+  mbedtls_pk_context key; mbedtls_pk_init(&key);
+  int rc = mbedtls_pk_parse_public_key(&key,
+      reinterpret_cast<const unsigned char*>(OTA_SIGNING_PUBLIC_KEY), strlen(OTA_SIGNING_PUBLIC_KEY) + 1);
+  if (rc == 0) {
+    uint8_t digest[32];
+    mbedtls_sha256(reinterpret_cast<const unsigned char*>(payload.c_str()), payload.length(), digest, 0);
+    rc = mbedtls_pk_verify(&key, MBEDTLS_MD_SHA256, digest, sizeof(digest), signature, signatureLength);
+  }
+  mbedtls_pk_free(&key);
+  return rc == 0;
 }
 
 bool versionIsNewer(const String& candidate, const String& current) {
@@ -998,18 +1027,24 @@ void startNormalWebServer() {
       http.end(); otaStatusMessage = "Update server returned HTTP " + String(code) + ".";
       server.send(502, "application/json", "{\"updateAvailable\":false,\"message\":\"" + jsonEscape(otaStatusMessage) + "\"}"); return;
     }
-    DynamicJsonDocument manifest(1024);
+    DynamicJsonDocument manifest(2048);
     DeserializationError error = deserializeJson(manifest, http.getStream());
     http.end();
     const char* version = manifest["version"] | "";
     const char* url = manifest["url"] | "";
     const char* sha256 = manifest["sha256"] | "";
+    const char* signature = manifest["signature"] | "";
     size_t imageSize = manifest["size"] | 0;
-    if (error || strlen(version) == 0 || strncmp(url, "https://", 8) != 0 ||
+    if (error || strlen(version) == 0 ||
         !isSha256Hex(sha256) || !isNumericVersion(version) || imageSize == 0 || imageSize > OTA_MAX_FIRMWARE_BYTES) {
       otaUpdateAvailable = false;
       otaStatusMessage = "The update manifest is invalid or incomplete.";
       server.send(502, "application/json", "{\"updateAvailable\":false,\"message\":\"" + otaStatusMessage + "\"}"); return;
+    }
+    if (!isTrustedOtaUrl(url, String(version)) || !verifyManifestSignature(version, url, sha256, imageSize, signature)) {
+      otaUpdateAvailable = false;
+      otaStatusMessage = "Manifest signature or trusted release URL validation failed.";
+      server.send(403, "application/json", "{\"updateAvailable\":false,\"message\":\"" + jsonEscape(otaStatusMessage) + "\"}"); return;
     }
     otaAvailableVersion = version;
     otaFirmwareUrl = url;
